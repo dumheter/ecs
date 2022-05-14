@@ -2,34 +2,36 @@ const std = @import("std");
 const testing = std.testing;
 
 const Entity = u64;
-const ComponentId = Entity;
+//const ComponentId = Entity;
 
 const World = struct {
     allocator: std.mem.Allocator,
     archetypes: std.ArrayList(Archetype),
-    entities: std.AutoHashMap(Entity, std.ArrayList(ComponentId)),
+    //entities: std.AutoHashMap(Entity, std.ArrayList(ComponentId)),
     next_entity: Entity,
 
     fn init(allocator: std.mem.Allocator) World {
         return World{
             .allocator = allocator,
             .archetypes = std.ArrayList(Archetype).init(allocator),
-            .entities = std.AutoHashMap(Entity, std.ArrayList(ComponentId)).init(allocator),
+            //.entities = std.AutoHashMap(Entity, std.ArrayList(ComponentId)).init(allocator),
             .next_entity = 0,
         };
     }
 
-    fn findArchetype(world: *World, component_ids: std.ArrayList(ComponentId)) ?*Archetype {
+    fn findArchetype(world: *World, component_names: std.ArrayList([]const u8)) ?*Archetype {
         for (world.archetypes.items) |*archetype| {
-            var found = true;
-            for (archetype.*.component_ids.items) |component_id, i| {
-                if (component_id != component_ids.items[i]) {
-                    found = false;
-                    break;
+            if (archetype.*.component_names.items.len == component_names.items.len) {
+                var found = true;
+                for (archetype.*.component_names.items) |component_name, i| {
+                    if (!std.mem.eql(u8, component_name, component_names.items[i])) {
+                        found = false;
+                        break;
+                    }
                 }
-            }
-            if (found) {
-                return archetype;
+                if (found) {
+                    return archetype;
+                }
             }
         }
 
@@ -45,12 +47,12 @@ const World = struct {
 
         defer world.next_entity += 1;
 
-        var archetype_name = std.ArrayList(u8).init(world.allocator);
+        std.debug.print("Make entity {}, with\n", .{world.next_entity});
 
-        var hashes = std.ArrayList(u64).init(world.allocator);
+        var component_names = std.ArrayList([]const u8).init(world.allocator);
 
         //@setEvalBranchQuota(2000000);
-        inline for (components_type_info.Struct.fields) |struct_field, field_idx| {
+        inline for (components_type_info.Struct.fields) |struct_field| {
             const field = @field(components, struct_field.name);
             const FieldType = @TypeOf(field);
             const field_type_info = @typeInfo(FieldType);
@@ -59,54 +61,52 @@ const World = struct {
                 @compileError("Expected " ++ struct_field.name ++ " to be a Type, found " ++ @typeName(struct_field.field_type));
             }
 
-            if (field_idx > 0) {
-                try archetype_name.append('-');
-            }
-
             const component_name = @typeName(FieldType);
 
-            var hash = std.hash.Wyhash.hash(0, component_name[0..]);
-
-            var i: usize = 0;
-            while (true) : (i += 1) {
-                if (i >= hashes.items.len) {
-                    try hashes.append(hash);
-                    break;
-                }
-
-                if (hash < hashes.items[i]) {
-                    try hashes.insert(i, hash);
-                    break;
+            var len_before = component_names.items.len;
+            for (component_names.items) |existing_component_name, list_i| {
+                if (std.mem.indexOfDiff(u8, component_name, existing_component_name)) |i| {
+                    if (component_name[i] < existing_component_name[i]) {
+                        try component_names.insert(list_i, component_name);
+                        break;
+                    }
+                } else {
+                    //std.debug.panic("Same component [{s}] found twice, that is illegal.", .{component_name});
+                    //@compileError("Same component found twice, that is illegal: " ++ component_name);
                 }
             }
+            if (len_before == component_names.items.len) {
+                try component_names.append(component_name);
+            }
 
-            std.debug.print(" component: {s}, hash: {}\n", .{component_name, hash});
-
-            try archetype_name.appendSlice(component_name[0..]);
+            std.debug.print(" component: {s}\n", .{component_name});
         }
 
-        var archetype_hash: u64 = 0;
-        for (hashes.items) |hash| {
-            var h: [*]const u8 = @ptrCast([*]const u8, &hash);
-            archetype_hash = std.hash.Wyhash.hash(archetype_hash, h[0..4]);
-        }
+        if (world.findArchetype(component_names)) |archetype| {
+            defer component_names.deinit();
 
-        std.debug.print("archetype: {s}, archetype_hash: {}\n", .{archetype_name.items[0..], archetype_hash});
-
-        if (world.findArchetype(hashes)) |archetype| {
-            defer hashes.deinit();
-            defer archetype_name.deinit();
-
-            std.debug.print("found existing archetype: {s}\n", .{archetype.name.items});
+            std.debug.print(" Found existing archetype: ", .{});
+            for (archetype.component_names.items) |name, i| {
+                if (i != 0) {
+                    std.debug.print("-", .{});
+                }
+                std.debug.print("{s}", .{name});
+            }
+            std.debug.print("\n", .{});
         } else {
             var archetype = try world.archetypes.addOne();
-            archetype.component_ids = hashes;
+            archetype.component_names = component_names;
             archetype.components = std.ArrayList(ComponentHolder).init(world.allocator);
-            archetype.id = archetype_hash;
-            archetype.name = archetype_name;
-        }
 
-        // TODO cgustafsson: otherwise add a new one
+            std.debug.print(" Creating archetype: ", .{});
+            for (component_names.items) |name, i| {
+                if (i != 0) {
+                    std.debug.print("-", .{});
+                }
+                std.debug.print("{s}", .{name});
+            }
+            std.debug.print("\n", .{});
+        }
     }
 };
 
@@ -114,33 +114,19 @@ const World = struct {
 ///
 /// # How to query for a component
 ///
-/// Archetype Components
-/// --------------------
-/// X         A, B, C
-/// Y         A, B
-/// Z         A, C
+/// entity components archetype
+///
+/// 1      A, B       X
+/// 2      A, B, C    Y
+/// 3      B, C       Z
 ///
 /// Query(.{A})    -> .{X, Y, Z}
 /// Query(.{A, B}) -> .{X, Y}
-/// Query(.{A, C}) -> .{X, Z}
+/// Query(.{B, C}) -> .{Y, Z}
 ///
-///
-/// entity components archetype
-///
-/// X      A, B       1
-/// Y      A, B, C    2
-///
-/// Query(.{A, B}) -> .{1, 2}
-///
-///
-
 const Archetype = struct {
-    component_ids: std.ArrayList(ComponentId), //< Sorted list of component ids.
+    component_names: std.ArrayList([]const u8), //< Sorted list of component names.
     components: std.ArrayList(ComponentHolder), //< List of component lists.
-
-    // entities: std.ArrrayList(Entity), // TODO cgustafsson: can this be used for anything?
-    id: ComponentId, // TODO cgustafsson: not used for anything? :(
-    name: std.ArrayList(u8), // TODO cgustafsson: debug only?
 };
 
 const ComponentHolder = struct {
