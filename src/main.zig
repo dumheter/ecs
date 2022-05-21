@@ -72,7 +72,7 @@ const World = struct {
         return null;
     }
 
-    /// Make a new entity, with the given `components`, and add it to the `world`.
+    /// Make a new entity, with the given `components`, in the `world`.
     fn make(world: *World, components: anytype) !void {
         defer world.next_entity += 1;
 
@@ -93,12 +93,11 @@ const World = struct {
             }
             std.debug.print("\n", .{});
 
-            inline for (@typeInfo(@TypeOf(components)).Struct.fields) |struct_field| {
+            inline for (std.meta.fields(@TypeOf(components))) |struct_field| {
                 const field = @field(components, struct_field.name);
                 const FieldType = @TypeOf(field);
-                const component_name = @typeName(FieldType);
                 std.debug.print("  Appending to existing component, {any}\n", .{field});
-                if (archetype.componentNameToComponentHolder(component_name)) |component_holder| {
+                if (archetype.componentNameToComponentHolder(@typeName(FieldType))) |component_holder| {
                     var typed_component_list = @ptrCast(*std.ArrayList(FieldType), &component_holder.type_erased_list);
                     try typed_component_list.append(field);
                 } else {
@@ -207,6 +206,11 @@ const World = struct {
         }
     }
 
+    /// world.query(.{A, B, C}) -> .{[]A, []B, []C}
+    fn query(world: *World, components: anytype) !Iterator(components) {
+        return Iterator(components).init(world);
+    }
+
     fn dump(world: World) void {
         std.debug.print("~~~ Archtype Dump ~~~\n", .{});
         for (world.archetypes.items) |archetype| {
@@ -218,14 +222,210 @@ const World = struct {
     }
 };
 
+/// Helper generic function to generate the deinit function for an `ArrayList(Component)`.
 fn deinitComponent(comptime Component: type) type {
     return struct {
         fn deinit(list: std.ArrayList(ComponentHolder.Dummy)) void {
             var typed_list = @ptrCast(*const std.ArrayList(Component), &list).*;
-            std.debug.print(" deinit component {s} with {} entities\n", .{@typeName(Component), typed_list.items.len});
             typed_list.deinit();
         }
     };
+}
+
+fn Iterator(components: anytype) type {
+    return struct {
+        const Self = @This();
+        //const ComponentTypes = GetTupleTypes(components);
+        const ComponentSlices = StructOfTypesToStructOfPointers(components, .Slice);
+        const Entry: type = StructOfTypesToStructOfPointers(components, .One);
+
+        component_slices: std.ArrayList(ComponentSlices),
+        archetype_i: u32 = 0,
+        slice_i: u32 = 0,
+
+        fn init(world: *World) !Self {
+            var iter = Self{.component_slices = std.ArrayList(ComponentSlices).init(world.allocator)};
+
+            // find all the archetypes that contain `components`,
+            // then makes slices and put it in our list
+            //world.
+
+            const component_names = tupleTypesToStringArray(components);
+            for (world.archetypes.items) |archetype| {
+                var slices = try iter.component_slices.addOne();
+                var matches: u32 = 0;
+
+                // reuse the componets tuple, to grab the field name and use for slices
+                inline for (std.meta.fields(@TypeOf(components))) |field| {
+                    var slice = &@field(slices, field.name);
+                    const ComponentType = @field(components, field.name);
+                    if (archetype.find(@typeName(ComponentType))) |component_holder| {
+                        var typed_component = @ptrCast(*std.ArrayList(ComponentType), &component_holder.type_erased_list);
+                        slice.* = typed_component.items[0..];
+                        matches += 1;
+                    }
+                }
+
+                if (matches != component_names.len) {
+                    _ = iter.component_slices.pop();
+                }
+            }
+
+            return iter;
+        }
+
+        fn deinit(iter: Self) void {
+            iter.component_slices.deinit();
+        }
+
+        fn next(iter: *Self) ?Entry {
+            if (iter.archetype_i < iter.component_slices.items.len) {
+                var slices = &iter.component_slices.items[iter.archetype_i];
+
+                iter.slice_i += 1;
+                if (iter.slice_i <= slices.@"0".len) {
+                    var entry: Entry = undefined;
+                    inline for (std.meta.fields(Entry)) |field| {
+                        //const Type = @field(Entry, field.name);
+                        var entry_field = &@field(entry, field.name);
+                        var slice = &@field(slices, field.name)[iter.slice_i-1];
+                        entry_field.* = slice;
+                    }
+                    return entry;
+                } else {
+                    iter.archetype_i += 1;
+                    iter.slice_i = 0;
+                    return next(iter);
+                }
+            }
+
+            return null;
+        }
+    };
+}
+
+/// tupleTypesToStringArray(.{A, B}) -> ["A", "B"]
+fn tupleTypesToStringArray(tuple: anytype) [std.meta.fields(@TypeOf(tuple)).len][]const u8 {
+    comptime {
+        var out: [std.meta.fields(@TypeOf(tuple)).len][]const u8 = undefined;
+
+        inline for (std.meta.fields(@TypeOf(tuple))) |field, i| {
+            const f = @field(tuple, field.name);
+            out[i] = @typeName(f);
+        }
+
+        return out;
+    }
+}
+
+test "tuple types to string array happy path" {
+    const res = tupleTypesToStringArray(.{A, B});
+
+    try std.testing.expectEqualStrings("A", res[0]);
+    try std.testing.expectEqualStrings("B", res[1]);
+}
+
+/// Given some types A, B and C, in a struct. Return a type like so:
+///
+/// with `pointer_size`.One:
+///   .{A, B, C} -> .{*A, *B, *C}
+///
+/// with `pointer_size` .Slice:
+/// .{A, B, C} -> .{[]A, []B, []C}
+///
+fn StructOfTypesToStructOfPointers(t: anytype, pointer_size: std.builtin.Type.Pointer.Size) type {
+    comptime {
+        const Type = @TypeOf(t);
+        const fields = std.meta.fields(Type);
+
+        var fields_out: [fields.len]std.builtin.Type.StructField = undefined;
+
+        inline for (fields) |field, i| {
+            const f = @field(t, field.name);
+            fields_out[i] = .{
+                .name = field.name,
+                .field_type = @Type(.{
+                    .Pointer = .{
+                        .size = pointer_size,
+                        .is_const = false,
+                        .is_volatile = false,
+                        .alignment = 0,
+                        .address_space = .generic,
+                        .child = f,
+                        .is_allowzero = false,
+                        .sentinel = null,
+                    }
+                }),
+                .default_value = null,
+                .is_comptime = false,
+                .alignment = field.alignment,
+            };
+        }
+
+        const OutType = @Type(.{
+            .Struct = .{
+                .layout = .Auto,
+                .fields = fields_out[0..],
+                .decls = &.{},
+                .is_tuple = false,
+            }
+        });
+
+        return OutType;
+    }
+}
+
+test "convert struct of types to struct of pointers happy path" {
+    const Struct_ = .{A, B};
+    const StructOfPointers = StructOfTypesToStructOfPointers(Struct_, .One);
+
+    // cannot use StructOfPointers directly for some reason, use this...
+    var a = A{};
+    var b = B{.b=5};
+    const dummy = StructOfPointers{.@"0" = &a, .@"1" = &b};
+
+    try std.testing.expectEqual(Struct_.@"0", @TypeOf(dummy.@"0".*));
+    try std.testing.expectEqual(Struct_.@"1", @TypeOf(dummy.@"1".*));
+}
+
+test "convert struct of types to struct of slices happy path" {
+    const Struct_ = .{A, B};
+    const StructOfSlices = StructOfTypesToStructOfPointers(Struct_, .Slice);
+
+    // cannot use StructOfSlices directly for some reason, use this...
+    var a = [_]A{A{}, A{}};
+    var b = [_]B{B{.b=5}};
+    const dummy = StructOfSlices{.@"0" = a[0..], .@"1" = b[0..]};
+
+    try std.testing.expectEqual(Struct_.@"0", @TypeOf(dummy.@"0"[0]));
+    try std.testing.expectEqual(Struct_.@"1", @TypeOf(dummy.@"1"[0]));
+}
+
+// TODO cgustafsson: broken, remove?
+/// .{A, B, C} -> [A, B, C]
+fn GetTupleTypes(t: anytype) [std.meta.fields(@TypeOf(t)).len] std.builtin.Type {
+    comptime {
+        const fields = std.meta.fields(@TypeOf(t));
+
+        var types: [fields.len]std.builtin.Type = undefined;
+
+        inline for (fields) |field, i| {
+            const f = @field(t, field.name);
+            types[i] = std.builtin.Type.Type{f};
+        }
+
+        return types;
+    }
+}
+
+test "convert Tuple to Array and the types match" {
+//    const struct_ = .{A, B};
+//    const tuple_ = GetTupleTypes(struct_);
+//
+//    const tuple = @Type(tuple_[0]){};
+//
+//    std.debug.print("\n{any}, {any}, {any}\n", .{struct_, tuple_[0], tuple});
+//    try std.testing.expectEqual(struct_.@"0", @Type(tuple_[0]));
 }
 
 /// An archetype is a set of components.
@@ -243,13 +443,11 @@ fn deinitComponent(comptime Component: type) type {
 /// Query(.{B, C}) -> .{Y, Z}
 ///
 const Archetype = struct {
+    // TODO cgustafsson: can this be the static type that tupleTypesToStringArray makes?
     component_names: std.ArrayList([]const u8), //< Sorted list of component names.
     components: std.ArrayList(ComponentHolder), //< List of component lists.
 
     fn deinit(archetype: *Archetype) void {
-        std.debug.print("deinit archetype ", .{});
-        archetype.dump();
-        std.debug.print("\n", .{});
         for (archetype.components.items) |*component_holder| {
             component_holder.deinit();
         }
@@ -257,19 +455,18 @@ const Archetype = struct {
         archetype.components.deinit();
     }
 
-    /// Does this `archetype` contain all the `component_names`.
-    fn contains(archetype: Archetype, component_names: std.ArrayList([]const u8)) bool {
-        var match: u32 = 0;
+    // TODO cgustafsson: not have an array list
+    /// Find, if this `archetype` contain a `component_name`, its list.
+    /// archetype{A, B, C}.contains("B") -> 1
+    /// archetype{A, B, C}.contains("W") -> null
+    fn find(archetype: Archetype, component_name: []const u8) ?*ComponentHolder {
         for (archetype.component_names.items) |archetype_component_name, i| {
-            if (i >= component_names.items.len) {
-                break;
-            }
-            if (std.mem.eql(u8, archetype_component_name, component_names.items[i])) {
-                match += 1;
+            if (std.mem.eql(u8, archetype_component_name, component_name)) {
+                return &archetype.components.items[i];
             }
         }
 
-        return match == component_names.items.len;
+        return null;
     }
 
     fn componentNameToComponentHolder(archetype: *Archetype, component_name: []const u8) ?*ComponentHolder {
@@ -325,29 +522,25 @@ test "complex world" {
 
     const Chair = struct {};
 
-    try world.make(.{
-        Person{},
-        Age{ .age = 30 },
-    });
-
-    world.dump();
-
-    try world.make(.{
-        Chair{},
-    });
-
-    world.dump();
-
-    try world.make(.{
-        Age{ .age = 20 },
-        Person{},
-    });
-
     const DammsugarNjutare = struct {};
 
     const KaffeBeroende = struct {};
 
     const Name = struct { name: []const u8 };
+
+    try world.make(.{
+        Person{},
+        Age{ .age = 30 },
+    });
+
+    try world.make(.{
+        Chair{},
+    });
+
+    try world.make(.{
+        Age{ .age = 20 },
+        Person{},
+    });
 
     try world.make(.{
         Person{},
@@ -359,59 +552,58 @@ test "complex world" {
 
     world.dump();
 
-    //var iter = try world.query(.{
-    //    Age{.age = 13},
-    //});
-    //std.debug.print("/////////////////////\n", .{});
-    //while (iter.next()) |t| {
-    //    std.debug.print("{any}\n", .{t});
-    //    //std.debug.print("{}, ", .{t.@"0".age});
-    //}
-    //std.debug.print("\n", .{});
+    var iter = try world.query(.{Age, Person});
+    defer iter.deinit();
+    std.debug.print("\nworld.query(.{any}) ->\n", .{.{Age, Person}});
+    while (iter.next()) |t| {
+        std.debug.print("  {any}, {any}\n", .{t.@"0", t.@"1"});
+    }
 }
 
 ///////////////////////////////////////////////////////////////////////////////
 
-const A = struct { a: u8, };
+
+// TODO cgustafsson: remove
+const A = struct { };
 const B = struct { b: u32, };
-
-test "return comptime struct with runtime values" {
-
-    const Closure = struct {
-        fn query(t: anytype) @TypeOf(t) {
-            const Type = @TypeOf(t);
-            var out = Type{undefined};
-
-            // fake runtime data
-            var aa = std.ArrayList(A).init(std.testing.allocator);
-            defer aa.deinit();
-            aa.append(.{.a = 'a'}) catch {};
-            var bb = std.ArrayList(B).init(std.testing.allocator);
-            defer bb.deinit();
-            bb.append(.{.b = 1337}) catch {};
-
-            inline for (@typeInfo(Type).Struct.fields) |field| {
-                var field_value = &@field(out, field.name);
-                if (field.field_type == A) {
-                    field_value.* = aa.items[0];
-                } else if (field.field_type == B) {
-                    field_value.* = bb.items[0];
-                }
-            }
-
-            return out;
-        }
-    };
-
-    var res = Closure.query(.{
-        A{.a = 0},
-        B{.b = 0},
-    });
-
-    std.debug.print("res: {any}\n", .{res});
-
-    try std.testing.expectEqual(res.@"0", A{.a = 'a'});
-    try std.testing.expectEqual(res.@"1", B{.b = 1337});
-}
+//
+//test "return comptime struct with runtime values" {
+//
+//    const Closure = struct {
+//        fn query(t: anytype) @TypeOf(t) {
+//            const Type = @TypeOf(t);
+//            var out = Type{undefined};
+//
+//            // fake runtime data
+//            var aa = std.ArrayList(A).init(std.testing.allocator);
+//            defer aa.deinit();
+//            aa.append(.{.a = 'a'}) catch {};
+//            var bb = std.ArrayList(B).init(std.testing.allocator);
+//            defer bb.deinit();
+//            bb.append(.{.b = 1337}) catch {};
+//
+//            inline for (@typeInfo(Type).Struct.fields) |field| {
+//                var field_value = &@field(out, field.name);
+//                if (field.field_type == A) {
+//                    field_value.* = aa.items[0];
+//                } else if (field.field_type == B) {
+//                    field_value.* = bb.items[0];
+//                }
+//            }
+//
+//            return out;
+//        }
+//    };
+//
+//    var res = Closure.query(.{
+//        A{.a = 0},
+//        B{.b = 0},
+//    });
+//
+//    std.debug.print("res: {any}\n", .{res});
+//
+//    try std.testing.expectEqual(res.@"0", A{.a = 'a'});
+//    try std.testing.expectEqual(res.@"1", B{.b = 1337});
+//}
 
 ///////////////////////////////////////////////////////////////////////////////
