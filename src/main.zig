@@ -23,20 +23,23 @@ const World = struct {
         world.archetypes.deinit();
     }
 
-    /// Find an archetype that contains all `component_names`.
-    fn findArchetypeExact(world: *World, component_names: [][]const u8) ?*Archetype {
+    /// Find an archetype that has the exact `component_names`.
+    fn findArchetypeExact(world: *World, component_names: []const []const u8) ?*Archetype {
         for (world.archetypes.items) |*archetype| {
-            if (archetype.*.component_names.items.len == component_names.len) {
-                var found = true;
-                for (archetype.*.component_names.items) |component_name, i| {
-                    if (!std.mem.eql(u8, component_name, component_names[i])) {
-                        found = false;
-                        break;
+            if (archetype.*.component_names.len == component_names.len) {
+                for (archetype.*.component_names) |archetype_component_name| {
+                    var found = false;
+                    for (component_names) |component_name| {
+                        if (std.mem.eql(u8, archetype_component_name, component_name)) {
+                            found = true;
+                            break;
+                        }
                     }
+
+                    if (!found) return null;
                 }
-                if (found) {
-                    return archetype;
-                }
+
+                return archetype;
             }
         }
 
@@ -49,18 +52,11 @@ const World = struct {
 
         std.debug.print("Make entity {}, with\n", .{world.next_entity});
 
-        var component_names = fieldTypesToStrings(components);
+        const component_names = fieldTypesToStrings(components);
 
-        if (world.findArchetypeExact(component_names[0..])) |archetype| {
-            defer component_names.deinit();
-
+        if (world.findArchetypeExact(component_names)) |archetype| {
             std.debug.print("  Found existing archetype: ", .{});
-            for (archetype.component_names.items) |name, i| {
-                if (i != 0) {
-                    std.debug.print("-", .{});
-                }
-                std.debug.print("{s}", .{name});
-            }
+            archetype.dump();
             std.debug.print("\n", .{});
 
             inline for (std.meta.fields(@TypeOf(components))) |struct_field| {
@@ -82,12 +78,7 @@ const World = struct {
             archetype.components = std.ArrayList(ComponentHolder).init(world.allocator);
 
             std.debug.print("  Creating archetype: ", .{});
-            for (component_names.items) |name, i| {
-                if (i != 0) {
-                    std.debug.print("-", .{});
-                }
-                std.debug.print("{s}", .{name});
-            }
+            archetype.dump();
             std.debug.print("\n", .{});
 
             inline for (std.meta.fields(@TypeOf(components))) |struct_field, struct_i| {
@@ -95,7 +86,7 @@ const World = struct {
                 const FieldType = @TypeOf(field);
                 const component_name = @typeName(FieldType);
 
-                for (archetype.component_names.items) |archetype_component_name, name_i| {
+                for (archetype.component_names) |archetype_component_name, name_i| {
                     // Make sure to insert components in same order as the names (sorted).
 
                     if (std.mem.eql(u8, archetype_component_name, component_name)) {
@@ -174,6 +165,7 @@ fn Iterator(components: anytype) type {
             //world.
 
             const component_names = fieldTypesToStrings(components);
+
             for (world.archetypes.items) |archetype| {
                 var slices = try iter.component_slices.addOne();
                 var matches: u32 = 0;
@@ -227,17 +219,25 @@ fn Iterator(components: anytype) type {
     };
 }
 
+// TODO cgustafsson: try make a fieldTypesToStringsSorted(.{A, C, B}) -> ["A", "B", "C"]
+
 /// fieldTypesToStrings(.{A, B}) -> ["A", "B"]
-fn fieldTypesToStrings(tuple: anytype) [std.meta.fields(@TypeOf(tuple)).len][]const u8 {
+fn fieldTypesToStrings(tuple: anytype) []const []const u8 {
     comptime {
         var out: [std.meta.fields(@TypeOf(tuple)).len][]const u8 = undefined;
 
         inline for (std.meta.fields(@TypeOf(tuple))) |field, i| {
-            const f = @field(tuple, field.name);
-            out[i] = @typeName(f);
+            if (std.meta.trait.is(.Type)(field.field_type)) {
+                const f = @field(tuple, field.name);
+                out[i] = @typeName(f);
+            } else {
+                //const f = @field(tuple, field.name);
+                // TODO cgustafsson: this correct?
+                out[i] = @typeName(field.field_type);
+            }
         }
 
-        return out;
+        return out[0..];
     }
 }
 
@@ -340,15 +340,13 @@ test "convert struct of types to struct of slices happy path" {
 /// Query(.{B, C}) -> .{Y, Z}
 ///
 const Archetype = struct {
-    // TODO cgustafsson: can this be the static type that fieldTypesToStrings makes?
-    component_names: std.ArrayList([]const u8), //< Sorted list of component names.
-    components: std.ArrayList(ComponentHolder), //< List of component lists.
+    component_names: []const []const u8,
+    components: std.ArrayList(ComponentHolder),
 
     fn deinit(archetype: *Archetype) void {
         for (archetype.components.items) |*component_holder| {
             component_holder.deinit();
         }
-        archetype.component_names.deinit();
         archetype.components.deinit();
     }
 
@@ -356,7 +354,7 @@ const Archetype = struct {
     /// archetype{A, B, C}.find("B") -> *component_holder{B}
     /// archetype{A, B, C}.find("W") -> null
     fn find(archetype: Archetype, component_name: []const u8) ?*ComponentHolder {
-        for (archetype.component_names.items) |archetype_component_name, i| {
+        for (archetype.component_names) |archetype_component_name, i| {
             if (std.mem.eql(u8, archetype_component_name, component_name)) {
                 return &archetype.components.items[i];
             }
@@ -366,7 +364,7 @@ const Archetype = struct {
     }
 
     fn dump(archetype: Archetype) void {
-        for (archetype.component_names.items) |name, i| {
+        for (archetype.component_names) |name, i| {
             if (i != 0) {
                 std.debug.print("-", .{});
             }
@@ -419,14 +417,20 @@ test "complex world" {
         Age{ .age = 30 },
     });
 
+    world.dump();
+
     try world.make(.{
         Chair{},
     });
+
+    //world.dump();
 
     try world.make(.{
         Age{ .age = 20 },
         Person{},
     });
+
+    world.dump();
 
     try world.make(.{
         Person{},
