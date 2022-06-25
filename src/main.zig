@@ -390,13 +390,43 @@ const ComponentHolder = struct {
 // test
 //
 
+test "showcase" {
+    // make the world
+    var allocator = std.testing.allocator;
+    var world = World.init(allocator);
+    defer world.deinit();
+
+    // these are our components
+    const Person = struct {};
+    const Age = struct {age: u32,};
+    const Squirel = struct {};
+
+    // make some entities
+    try world.make(.{Person{}, Age{.age = 30,}});
+    try world.make(.{Person{}, Age{.age = 77,}});
+    try world.make(.{Squirel{}, Age{.age = 2}});
+
+    // find the entities that are `Person` and `Age`.
+    var person_iter = try world.query(.{Person, Age});
+    defer person_iter.deinit(); // sadly needed for now
+    while (person_iter.next()) |res| {
+        std.debug.print("🧔 Person, age {}.\n", .{res.@"1".age});
+    }
+
+    // find the entities that are `Squirel` and `Age`.
+    var squirel_iter = try world.query(.{Squirel, Age});
+    defer squirel_iter.deinit(); // sadly needed for now
+    while (squirel_iter.next()) |res| {
+        std.debug.print("🐿 Squirel, age {}.\n", .{res.@"1".age});
+    }
+}
+
 test "complex world" {
     std.debug.print("\n", .{});
 
     var allocator = std.testing.allocator;
     var world = World.init(allocator);
     defer world.deinit();
-    _ = world;
 
     const Person = struct {};
 
