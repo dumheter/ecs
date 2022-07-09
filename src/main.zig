@@ -1,7 +1,14 @@
 const std = @import("std");
 const testing = std.testing;
 
+/// Turn on for internal debug messages for all functions.
+const debug_print: bool = true;
+
 const Entity = u64;
+
+// todo
+//
+// EntityId -> Type
 
 const World = struct {
     allocator: std.mem.Allocator,
@@ -50,19 +57,19 @@ const World = struct {
     fn make(world: *World, components: anytype) !void {
         defer world.next_entity += 1;
 
-        std.debug.print("Make entity {}, with\n", .{world.next_entity});
+        if (debug_print) std.debug.print("Make entity {}, with\n", .{world.next_entity});
 
         const component_names = fieldTypesToStrings(components);
 
         if (world.findArchetypeExact(component_names)) |archetype| {
-            std.debug.print("  Found existing archetype: ", .{});
-            archetype.dump();
-            std.debug.print("\n", .{});
+            if (debug_print) std.debug.print("  Found existing archetype: ", .{});
+            if (debug_print) archetype.dump();
+            if (debug_print) std.debug.print("\n", .{});
 
             inline for (std.meta.fields(@TypeOf(components))) |struct_field| {
                 const field = @field(components, struct_field.name);
                 const FieldType = @TypeOf(field);
-                std.debug.print("  Appending to existing component, {any}\n", .{field});
+                if (debug_print) std.debug.print("  Appending to existing component, {any}\n", .{field});
                 if (archetype.find(@typeName(FieldType))) |component_holder| {
                     var typed_component_list = @ptrCast(*std.ArrayList(FieldType), &component_holder.type_erased_list);
                     try typed_component_list.append(field);
@@ -77,9 +84,9 @@ const World = struct {
             archetype.component_names = component_names;
             archetype.components = std.ArrayList(ComponentHolder).init(world.allocator);
 
-            std.debug.print("  Creating archetype: ", .{});
-            archetype.dump();
-            std.debug.print("\n", .{});
+            if (debug_print) std.debug.print("  Creating archetype: ", .{});
+            if (debug_print) archetype.dump();
+            if (debug_print) std.debug.print("\n", .{});
 
             inline for (std.meta.fields(@TypeOf(components))) |struct_field, struct_i| {
                 const field = @field(components, struct_field.name);
@@ -90,7 +97,7 @@ const World = struct {
                     // Make sure to insert components in same order as the names (sorted).
 
                     if (std.mem.eql(u8, archetype_component_name, component_name)) {
-                        std.debug.print("  New component {any} @{}. In archetype: {{name: {s}, name_i: {}}}\n", .{field, struct_i, archetype_component_name, name_i});
+                        if (debug_print) std.debug.print("  New component {any} @{}. In archetype: {{name: {s}, name_i: {}}}\n", .{field, struct_i, archetype_component_name, name_i});
                         var new_component_list = std.ArrayList(FieldType).init(world.allocator);
                         try new_component_list.append(field);
 
@@ -121,8 +128,20 @@ const World = struct {
     }
 
     /// world.query(.{A, B, C}) -> .{[]A, []B, []C}
+    ///
+    /// Example
+    /// ```
+    /// var iter = world.query(.{A, B});
+    /// while (iter.next()) |res}| {
+    ///   std.debug.print("{}, {}", .{res.@"0".value, res.@"1".value});
+    /// }
+    /// ```
     fn query(world: *World, components: anytype) !Iterator(components) {
         return Iterator(components).init(world);
+    }
+
+    fn remove(world: *World) void {
+        
     }
 
     fn dump(world: World) void {
@@ -146,6 +165,11 @@ fn deinitComponent(comptime Component: type) type {
     };
 }
 
+/// Iterate over `components` in a `world`.
+///
+/// Calling `next` will seamlessly iterate over multiplie archetypes as needed.
+///
+/// Unfortunately, has to allocate memory since we don't know how many archetypes the `components` will be contained in.
 fn Iterator(components: anytype) type {
     return struct {
         const Self = @This();
