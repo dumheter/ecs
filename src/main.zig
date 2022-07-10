@@ -31,6 +31,14 @@ const World = struct {
     }
 
     /// Make a new entity, with the given `components`, in the `world`.
+    ///
+    /// Example
+    /// ```
+    /// const Person = struct {...};
+    /// const Age = struct {...};
+    /// var world = World{...};
+    /// try world.make(.{Person{}, Age{.age = 30,}});
+    /// ```
     fn make(world: *World, components: anytype) !void {
         defer world.next_entity += 1;
 
@@ -49,9 +57,11 @@ const World = struct {
                 if (debug_print) std.debug.print("  Appending to existing component, {any}\n", .{field});
                 if (archetype.find(@typeName(FieldType))) |component_holder| {
                     var typed_component_list = @ptrCast(*std.ArrayList(FieldType), &component_holder.type_erased_list);
+                    var index = typed_component_list.items.len;
                     try typed_component_list.append(field);
+                    try archetype.entities.put(world.next_entity, index);
                 } else {
-                    // Should be compiler error here, but ICE.
+                    // Should be compiler error / panic here, but ICE.
                     // todo in future zig version
                     //std.debug.panic("Could not find the correct component holder, but the component name was found?", .{});
                 }
@@ -60,6 +70,8 @@ const World = struct {
             var archetype = try world.archetypes.addOne();
             archetype.component_names = component_names;
             archetype.components = std.ArrayList(ComponentHolder).init(world.allocator);
+            archetype.entities = std.AutoHashMap(Entity, Archetype.Index).init(world.allocator);
+            try archetype.entities.put(world.next_entity, 0);
 
             if (debug_print) std.debug.print("  Creating archetype: ", .{});
             if (debug_print) archetype.dump();
@@ -405,14 +417,19 @@ test "convert struct of types to struct of slices happy path" {
 /// Query(.{B, C}) -> .{Y, Z}
 ///
 const Archetype = struct {
+    const Index = usize;
+
     component_names: []const []const u8,
     components: std.ArrayList(ComponentHolder),
+    // NOTE: assuming we will have less than 4 billion entities in the archetype
+    entities: std.AutoHashMap(Entity, Index),
 
     fn deinit(archetype: *Archetype) void {
         for (archetype.components.items) |*component_holder| {
             component_holder.deinit();
         }
         archetype.components.deinit();
+        archetype.entities.deinit();
     }
 
     /// Find the ComponentHolder for a `component_name` in this `archetype`.
@@ -429,12 +446,25 @@ const Archetype = struct {
     }
 
     fn dump(archetype: Archetype) void {
-        for (archetype.component_names) |name, i| {
-            if (i != 0) {
-                std.debug.print("-", .{});
-            }
-            std.debug.print("{s}", .{name});
+        var iter = archetype.entities.iterator();
+        std.debug.print("{{components: [", .{});
+
+        for (archetype.component_names) |component_name, i| {
+            if (i > 0)
+                std.debug.print(", ", .{});
+            std.debug.print("{s}", .{component_name});
         }
+        std.debug.print("], entities: [", .{});
+
+        var i: usize = 0;
+        while (iter.next()) |entry| {
+            if (i > 0) {
+                std.debug.print(", ", .{});
+            }
+            i += 1;
+            std.debug.print("{}/{}", .{entry.key_ptr.*, entry.value_ptr.*});
+        }
+        std.debug.print("]}}", .{});
     }
 };
 
@@ -484,6 +514,8 @@ test "showcase" {
     while (squirel_iter.next()) |res| {
         std.debug.print("🐿 Squirel, age {}.\n", .{res.@"1".age});
     }
+
+    world.dump();
 }
 
 test "complex world" {
