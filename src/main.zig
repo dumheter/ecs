@@ -30,36 +30,13 @@ const World = struct {
         world.archetypes.deinit();
     }
 
-    /// Find an archetype that has the exact `component_names`.
-    fn findArchetypeExact(world: *World, component_names: []const []const u8) ?*Archetype {
-        for (world.archetypes.items) |*archetype| {
-            if (archetype.*.component_names.len == component_names.len) {
-                for (archetype.*.component_names) |archetype_component_name| {
-                    var found = false;
-                    for (component_names) |component_name| {
-                        if (std.mem.eql(u8, archetype_component_name, component_name)) {
-                            found = true;
-                            break;
-                        }
-                    }
-
-                    if (!found) return null;
-                }
-
-                return archetype;
-            }
-        }
-
-        return null;
-    }
-
     /// Make a new entity, with the given `components`, in the `world`.
     fn make(world: *World, components: anytype) !void {
         defer world.next_entity += 1;
 
         if (debug_print) std.debug.print("Make entity {}, with\n", .{world.next_entity});
 
-        const component_names = fieldTypesToStrings(components);
+        const component_names = fieldTypesToStringsSorted(components);
 
         if (world.findArchetypeExact(component_names)) |archetype| {
             if (debug_print) std.debug.print("  Found existing archetype: ", .{});
@@ -74,8 +51,8 @@ const World = struct {
                     var typed_component_list = @ptrCast(*std.ArrayList(FieldType), &component_holder.type_erased_list);
                     try typed_component_list.append(field);
                 } else {
-                    // logic error
-                    // compiler returns with code 5 if I add a panic here... ?
+                    // Should be compiler error here, but ICE.
+                    // todo in future zig version
                     //std.debug.panic("Could not find the correct component holder, but the component name was found?", .{});
                 }
             }
@@ -93,14 +70,16 @@ const World = struct {
                 const FieldType = @TypeOf(field);
                 const component_name = @typeName(FieldType);
 
-                for (archetype.component_names) |archetype_component_name, name_i| {
-                    // Make sure to insert components in same order as the names (sorted).
+                // NOTE: For loop needed for when component_names are sorted.
+                for (component_names) |inner_component_name, name_i| {
+                    // Make sure to insert components in same order as the `component_names` (sorted).
 
-                    if (std.mem.eql(u8, archetype_component_name, component_name)) {
-                        if (debug_print) std.debug.print("  New component {any} @{}. In archetype: {{name: {s}, name_i: {}}}\n", .{field, struct_i, archetype_component_name, name_i});
+                    if (std.mem.eql(u8, inner_component_name, component_name)) {
+                        if (debug_print) std.debug.print("  New component {any} @{}. In archetype: {{name: {s}, name_i: {}}}\n", .{field, struct_i, inner_component_name, name_i});
                         var new_component_list = std.ArrayList(FieldType).init(world.allocator);
                         try new_component_list.append(field);
 
+                        // Cannot declare the closure here, compiler will fail to run it.
                         const Closure = deinitComponent(FieldType);
 
                         if (name_i < archetype.components.items.len) {
@@ -117,10 +96,6 @@ const World = struct {
                             });
                         }
                         break;
-                    } else {
-                        // compiler returns with code 5 if I add a panic here... ?
-                        //std.debug.panic("Same component [{s}] found twice, that is illegal.", .{component_name});
-                        //@compileError("Same component found twice, that is illegal: " ++ component_name);
                     }
                 }
             }
@@ -141,7 +116,30 @@ const World = struct {
     }
 
     fn remove(world: *World) void {
-        
+        _ = world;
+    }
+
+    /// Find the archetype that has the exact `component_names`.
+    fn findArchetypeExact(world: *World, component_names: []const []const u8) ?*Archetype {
+        for (world.archetypes.items) |*archetype| {
+            if (archetype.*.component_names.len == component_names.len) {
+                for (archetype.*.component_names) |inner_component_name| {
+                    var found = false;
+                    for (component_names) |component_name| {
+                        if (std.mem.eql(u8, inner_component_name, component_name)) {
+                            found = true;
+                            break;
+                        }
+                    }
+
+                    if (!found) return null;
+                }
+
+                return archetype;
+            }
+        }
+
+        return null;
     }
 
     fn dump(world: World) void {
@@ -243,9 +241,7 @@ fn Iterator(components: anytype) type {
     };
 }
 
-// TODO cgustafsson: try make a fieldTypesToStringsSorted(.{A, C, B}) -> ["A", "B", "C"]
-
-/// fieldTypesToStrings(.{A, B}) -> ["A", "B"]
+/// fieldTypesToStrings(.{A, C, B}) -> ["A", "C", "B"]
 fn fieldTypesToStrings(tuple: anytype) []const []const u8 {
     comptime {
         var out: [std.meta.fields(@TypeOf(tuple)).len][]const u8 = undefined;
@@ -255,8 +251,6 @@ fn fieldTypesToStrings(tuple: anytype) []const []const u8 {
                 const f = @field(tuple, field.name);
                 out[i] = @typeName(f);
             } else {
-                //const f = @field(tuple, field.name);
-                // TODO cgustafsson: this correct?
                 out[i] = @typeName(field.field_type);
             }
         }
@@ -266,10 +260,57 @@ fn fieldTypesToStrings(tuple: anytype) []const []const u8 {
 }
 
 test "tuple types to string array happy path" {
-    const res = fieldTypesToStrings(.{A, B});
+    const res = fieldTypesToStrings(.{A, C, B});
+
+    try std.testing.expectEqualStrings("A", res[0]);
+    try std.testing.expectEqualStrings("C", res[1]);
+    try std.testing.expectEqualStrings("B", res[2]);
+}
+
+/// fieldTypesToStringsSorted(.{A, C, B}) -> ["A", "B", "C"]
+fn fieldTypesToStringsSorted(tuple: anytype) []const []const u8 {
+    comptime {
+        var out: [std.meta.fields(@TypeOf(tuple)).len][]const u8 = undefined;
+
+        inline for (std.meta.fields(@TypeOf(tuple))) |field| {
+            // NOTE: Sadly dont seem to be able to break out this `getName` to a function.
+            var name: []const u8 = undefined;
+            if (std.meta.trait.is(.Type)(field.field_type)) {
+                const f = @field(tuple, field.name);
+                name = @typeName(f);
+            } else {
+                name = @typeName(field.field_type);
+            }
+
+            var pos: u32 = 0;
+            inline for(std.meta.fields(@TypeOf(tuple))) |inner_field| {
+                var inner_name: []const u8 = undefined;
+                if (std.meta.trait.is(.Type)(inner_field.field_type)) {
+                    const f = @field(tuple, inner_field.name);
+                    inner_name = @typeName(f);
+                } else {
+                    inner_name = @typeName(inner_field.field_type);
+                }
+
+                const order = std.mem.order(u8, name, inner_name);
+                if (order == std.math.Order.gt) {
+                    pos += 1;
+                }
+            }
+
+            out[pos] = name;
+        }
+
+        return out[0..];
+    }
+}
+
+test "tuple types to sorted string array happy path" {
+    const res = fieldTypesToStringsSorted(.{A, C, B});
 
     try std.testing.expectEqualStrings("A", res[0]);
     try std.testing.expectEqualStrings("B", res[1]);
+    try std.testing.expectEqualStrings("C", res[2]);
 }
 
 /// Given some types A, B and C, in a struct. Return a type like so:
@@ -531,3 +572,4 @@ test "complex world" {
 // used for testing
 const A = struct { };
 const B = struct { b: u32, };
+const C = struct { c: f32, };
