@@ -6,10 +6,6 @@ const debug_print: bool = true;
 
 const Entity = u64;
 
-// todo
-//
-// EntityId -> Type
-
 const World = struct {
     allocator: std.mem.Allocator,
     archetypes: std.ArrayList(Archetype),
@@ -127,8 +123,15 @@ const World = struct {
         return Iterator(components).init(world);
     }
 
-    fn remove(world: *World) void {
-        _ = world;
+    fn remove(world: *World, entity: Entity) bool {
+        for (world.archetypes.items) |*archetype| {
+            //NOTE cgustafsson: Should we remove the archetype as well if its empty after the remove?
+            if (archetype.remove(entity)) {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     /// Find the archetype that has the exact `component_names`.
@@ -155,13 +158,13 @@ const World = struct {
     }
 
     fn dump(world: World) void {
-        std.debug.print("~~~ Archtype Dump ~~~\n", .{});
+        std.debug.print("~~~ World Archtype Dump ~~~\n", .{});
         for (world.archetypes.items) |archetype| {
             std.debug.print(" ", .{});
             archetype.dump();
             std.debug.print("\n", .{});
         }
-        std.debug.print("~~~~~~~~~~~~~~~~~~~~~\n", .{});
+        std.debug.print("~~~~~~~~~~~~~~~~~~~~~~~~~~~\n", .{});
     }
 };
 
@@ -432,6 +435,44 @@ const Archetype = struct {
         archetype.entities.deinit();
     }
 
+    /// @return Was the entity removed?
+    ///
+    /// Given:
+    ///  component_names: ["A", "B"]
+    ///  components: {"A": [0, 1, 2], "B": [0, 1, 2]}
+    ///  entities: {2: 0, 7: 1, 13: 2}
+    /// > archetype.remove(7)
+    ///  component_names: ["A", "B"]
+    ///  components: {"A": [0, 1], "B": [0, 1]}
+    ///  entities: {2: 0, 13: 1}
+    ///  NOTE: entities entry 13 now points to 1, instead of 2.
+    ///
+    /// ```
+    fn remove(archetype: *Archetype, entity: Entity) bool {
+        if (archetype.entities.get(entity)) |index_to_remove| {
+
+            var old_index: usize = undefined;
+
+            for (archetype.components.items) |*component_holder| {
+                var old_len = component_holder.type_erased_list.items.len;
+                old_index = old_len - 1;
+                std.debug.assert(old_len >= 1);
+                std.debug.print("{}, {}\n", .{index_to_remove, component_holder.type_erased_list.items.len});
+                // TODO: we actually need to know the type to remove it... (or size of the type)
+                _ = component_holder.type_erased_list.swapRemove(index_to_remove);
+            }
+
+            var iter = archetype.entities.iterator();
+            while (iter.next()) |entry| {
+                if (entry.value_ptr.* == old_index) {
+                    entry.value_ptr.* = index_to_remove;
+                }
+            }
+        }
+
+        return false;
+    }
+
     /// Find the ComponentHolder for a `component_name` in this `archetype`.
     /// archetype{A, B, C}.find("B") -> *component_holder{B}
     /// archetype{A, B, C}.find("W") -> null
@@ -443,6 +484,10 @@ const Archetype = struct {
         }
 
         return null;
+    }
+
+    fn contains(archetype: Archetype, entity: Entity) ?Index {
+        return archetype.entities.get(entity);
     }
 
     fn dump(archetype: Archetype) void {
@@ -515,7 +560,12 @@ test "showcase" {
         std.debug.print("🐿 Squirel, age {}.\n", .{res.@"1".age});
     }
 
-    world.dump();
+    // find the entities that have `Age`.
+    var age_iter = try world.query(.{Age});
+    defer age_iter.deinit(); // sadly needed for now
+    while (age_iter.next()) |res| {
+        std.debug.print("👴 age {}.\n", .{res.@"0".age});
+    }
 }
 
 test "complex world" {
@@ -597,6 +647,54 @@ test "complex world" {
     //while (iter.next()) |t| {
     //    std.debug.print("  {any}, {any}\n", .{t.@"0", t.@"1"});
     //}
+}
+
+test "remove" {
+    var allocator = std.testing.allocator;
+    var world = World.init(allocator);
+    defer world.deinit();
+
+    const Person = struct {};
+    const Age = struct {age: u32,};
+    const Squirel = struct {};
+
+    try world.make(.{Person{}, Age{.age = 30,}});
+    try world.make(.{Person{}, Age{.age = 77,}});
+    try world.make(.{Squirel{}, Age{.age = 2}});
+
+    var person_age_entities: u32 = 0;
+    var person_iter = try world.query(.{Person, Age});
+    defer person_iter.deinit(); // sadly needed for now
+    while (person_iter.next()) |_| {
+        person_age_entities += 1;
+    }
+    try std.testing.expectEqual(person_age_entities, 2);
+
+    var squirel_age_entities: u32 = 0;
+    var squirel_iter = try world.query(.{Squirel, Age});
+    defer squirel_iter.deinit(); // sadly needed for now
+    while (squirel_iter.next()) |_| {
+        squirel_age_entities += 1;
+    }
+    try std.testing.expectEqual(squirel_age_entities, 1);
+
+    var age_entities: u32 = 0;
+    var age_iter = try world.query(.{Age});
+    defer age_iter.deinit(); // sadly needed for now
+    while (age_iter.next()) |_| {
+        age_entities += 1;
+    }
+    try std.testing.expectEqual(age_entities, 3);
+
+    try std.testing.expect(world.remove(1));
+
+    age_entities = 0;
+    var age_iter2 = try world.query(.{Age});
+    defer age_iter2.deinit(); // sadly needed for now
+    while (age_iter2.next()) |_| {
+        age_entities += 1;
+    }
+    try std.testing.expectEqual(age_entities, 2);
 }
 
 ///////////////////////////////////////////////////////////////////////////////

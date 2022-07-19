@@ -30,6 +30,13 @@ test "showcase" {
     while (squirel_iter.next()) |res| {
         std.debug.print("🐿 Squirel, age {}.\n", .{res.@"1".age});
     }
+
+    // find the entities that have `Age`.
+    var age_iter = try world.query(.{Age});
+    defer age_iter.deinit(); // sadly needed for now
+    while (age_iter.next()) |res| {
+        std.debug.print("👴 age {}.\n", .{res.@"0".age});
+    }
 }
 ```
 outputs:
@@ -39,5 +46,8 @@ test "showcase"...
 🧔 Person, age 30.
 🧔 Person, age 77.
 🐿 Squirel, age 2.
+👴 age 30.
+👴 age 77.
+👴 age 2.
 OK
 ```
